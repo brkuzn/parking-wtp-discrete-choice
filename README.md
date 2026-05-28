@@ -1,4 +1,4 @@
-# Urban Mobility & Parking Valuation — Discrete Choice Analysis
+# Willingness to Pay for Parking and Commuter Mode Choice: A Discrete Choice Analysis with Counterfactual Simulation
 
 **Does informing drivers about the environmental or financial cost of car use change how much they are willing to pay for parking? And what actually determines whether someone drives, cycles, or walks to university?**
 
@@ -143,4 +143,5 @@ install.packages(c("mlogit", "tidyverse", "modelsummary", "dfidx",
 
 ---
 
-Uzun, B. (2025). *Urban Mobility and Parking Valuation: A Discrete Choice Analysis of Commuter Behavior.* Applied Environmental Economics, University of Oldenburg.
+Uzun, B. (2025). *Willingness to Pay for Parking and Commuter Mode Choice: A
+Discrete Choice Analysis with Counterfactual Simulation. Applied Environmental Economics, University of Oldenburg.
