@@ -4,6 +4,8 @@
 
 This project applies contingent valuation and discrete choice econometrics to survey data on commuter behavior at the University of Oldenburg. It combines willingness-to-pay (WTP) estimation across a randomized information experiment with a conditional logit model of transport mode choice — culminating in a counterfactual policy simulation.
 
+📄 [Read the working paper](./wtp_discrete_choice.pdf)
+
 ---
 
 ## Key Findings
