@@ -1,0 +1,603 @@
+---
+title: "Project in Applied Environmental Economics (Summer 2025)"
+author:
+- Burak Uzun
+date: "10 August 2025"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+header-includes: \usepackage{tabularray}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+\newpage
+
+```{r message=FALSE, warning=FALSE}
+library(mlogit)
+library(tidyverse)
+library(modelsummary)
+library(readr)
+library(dfidx)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(purrr)
+library(ggplot2)
+library(tibble)
+library(sandwich)
+```
+
+
+## 1. Data
+
+```{r}
+df <- read.csv("raw_data.csv")
+
+# Renaming Variables
+df <- df %>%
+  rename(
+    eligible   = E1,
+    gender    = D1,
+    age       = D2,
+    group = D3,
+    indv_inc  = D5,
+    hh_inc    = D6,
+    child     = D7,
+    primary_transp   = HC4,
+    secondary_transp = HC41,
+    distance = HC1
+  )
+
+
+```
+
+## 2. Sample Representativeness
+```{r}
+# Create numeric indicator variables
+df <- df %>%
+  mutate(
+    gender_dummy        = ifelse(gender == "Female", 1, 0),
+    group_dummy         = ifelse(group == "Students", 1, 0),
+    child_dummy         = ifelse(child == "Yes", 1, 0),
+    car_primary_dummy   = ifelse(primary_transp == "Car", 1, 0),
+    car_secondary_dummy = ifelse(secondary_transp == "Car", 1, 0),
+    indv_inc_numeric    = case_when(
+      indv_inc == "0€ - 25 000€"         ~ 1,
+      indv_inc == "25 001€ - 50 000€"    ~ 2,
+      indv_inc == "50 001€ - 75 000€"    ~ 3,
+      indv_inc == "75 001€ or more"      ~ 4,
+      TRUE ~ 0L
+    ),
+    hh_inc_numeric      = case_when(
+      hh_inc == "0 - 25 000€"           ~ 1,
+      hh_inc == "25 001€ - 50 000€"    ~ 2,
+      hh_inc == "50 001€ - 75 000€"    ~ 3,
+      hh_inc == "75 001€ or more"      ~ 4,
+      TRUE ~ 0L
+    ),
+    age                = as.numeric(age),
+    distance           = as.numeric(distance)
+  )
+
+# Check indicator variables
+df %>% select(gender_dummy, group_dummy, child_dummy, car_primary_dummy,
+              car_secondary_dummy, indv_inc_numeric, hh_inc_numeric) %>% head()
+
+
+# Summary of key characteristics for representativeness
+df_summary <- df %>%
+  summarise(
+    share_female        = mean(gender_dummy, na.rm = TRUE),
+    share_students      = mean(group_dummy, na.rm = TRUE),
+    share_with_child    = mean(child_dummy, na.rm = TRUE),
+    share_car_primary   = mean(car_primary_dummy, na.rm = TRUE),
+    share_car_secondary = mean(car_secondary_dummy, na.rm = TRUE),
+    mean_age            = mean(age, na.rm = TRUE)
+  )
+
+df_summary
+```
+The sample seems to be younger, more female, and more student-heavy than the general population. In particular, 67.8% of respondents are female, and 77.8% are students, both being much greater than typical share given the general population characteristics. The sample has a mean age of 28.84 years, which signals a younger population overall, and just 11.9% of respondents have children, indicating that older adults and parents are likely underrepresented. Apart from that, 16.1% of respondents report having a car as their main mode and 21.5% as a secondary mode, which may be lower than population averages and may reflect that a more urban or campus-based sample does not rely on this mode of transportation as much as alternate modes of transport.
+
+```{r}
+# Visualization
+# Age-Gender Distribution
+
+a <- df$age
+m <- mean(a, na.rm = TRUE)
+s <- sd(a, na.rm = TRUE)
+
+result <- df %>%
+  group_by(gender) %>%
+  nest() %>%
+  mutate(
+    y = map(data, ~ {
+      data_group <- .
+      dnorm(data_group$age, mean = m, sd = s) * sum(!is.na(data_group$age))
+    })
+  ) %>%
+  unnest(c(data, y))
+
+# Graph
+ggplot(result, aes(x = age)) +
+  geom_histogram(data = df, aes(y = ..count..), binwidth = 1, colour = "black", fill = "lightblue") +
+  geom_line(aes(y = y), color = "red", size = 1) +
+  facet_wrap(~ gender) +
+  labs(title = "Age distribution with Normal curve by Gender",
+       y = "Frequency",
+       x = "Age") +
+  theme_minimal()
+```
+The age distribution plot shows that the majority of respondents are in their 20s, with a particularly high concentration between ages 20 and 30, especially among females. Males also cluster in the younger age range but with slightly more spread toward the 30–40 range. Very few respondents are over 50, indicating that older age groups are underrepresented. The “Other” gender category has very few observations overall, spread sparsely across ages.
+
+```{r}
+# Gender and Primary Transportation
+result_transportation <- df %>% 
+  group_by(gender, primary_transp) %>% 
+  summarise(count = n(), .groups = "drop")
+
+ggplot(result_transportation, aes(x = primary_transp, y = count, fill = gender)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Primary Transportation Options by Gender", y = "Count", x = "Primary Transportation") +
+  theme_minimal() +
+  scale_fill_manual(values = c("lightblue", "lightpink", "lightgreen"))
+```
+The transportation plot reveals that bike or e-bike is the most common primary transportation mode for both genders, but especially for females, who dominate this category. Males are more likely than females to use cars as their primary transport, while females choose buses and trains more frequently than males. Walking is also more common among females. Motor scooter or motorbike usage is minimal for both genders. This distribution suggests a sample with lower car dependency than might be expected in a general population, potentially reflecting an urban or student-oriented environment.
+
+
+## 3. Willingness to Pay for Parking
+
+
+```{r}
+# Define mapping from variable names to prices (€ per hour)
+price_map <- tibble(
+  var = c("V3","V4","V5","V6","V7","V8","V9","V10",
+           paste0(c("V3","V4","V5","V6","V7","V8","V9","V10"), "B"),
+           paste0(c("V3","V4","V5","V6","V7","V8","V9","V10"), "C")),
+  price = c(1.0, 1.5, 1.75, 2.0, 2.25, 0.75, 0.5, 0.25,
+            rep(c(1.0, 1.5, 1.75, 2.0, 2.25, 0.75, 0.5, 0.25), 2))
+)
+
+df_long <- df %>%
+  pivot_longer(cols = starts_with("V"), names_to = "var", values_to = "response") %>%
+  left_join(price_map, by = "var") %>%
+  filter(
+    (randnumber == 1 & str_detect(var, "^V(3|4|5|6|7|8|9|10)$")) |
+    (randnumber == 2 & str_detect(var, "^V(3|4|5|6|7|8|9|10)B$")) |
+    (randnumber == 3 & str_detect(var, "^V(3|4|5|6|7|8|9|10)C$"))
+  ) %>%
+  mutate(
+    response_bin = case_when(
+      response == "Yes" ~ 1,
+      response == "No"  ~ 0,
+      TRUE               ~ 0
+    )
+  )
+
+
+# Compute WTP (maximum price with a "Yes" response) for each respondent
+df_wtp <- df_long %>%
+  group_by(id) %>%
+  summarise(wtp = max(price[response_bin == 1], na.rm = TRUE, default = 0)) %>%
+  mutate(wtp = ifelse(is.infinite(wtp), 0, wtp))
+
+# Merge WTP back into the main data and restrict to potential car users
+df <- df %>% left_join(df_wtp, by = "id")
+df_car <- df %>% filter(primary_transp == "Car" | secondary_transp == "Car")
+
+# Summarize WTP by randomization group
+wtp_summary <- df_car %>%
+  group_by(randnumber) %>%
+  summarise(n = n(), mean_wtp = mean(wtp, na.rm = TRUE),
+            median_wtp = median(wtp, na.rm = TRUE), sd_wtp = sd(wtp, na.rm = TRUE))
+wtp_summary
+
+# Visualize WTP distribution
+ggplot(df_car, aes(x = factor(randnumber), y = wtp, fill = factor(randnumber))) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.1, alpha = 0.4) +
+  scale_fill_brewer(type = "qual", palette = 2) +
+  labs(x = "Randomisation group (A=1, B=2, C=3)",
+       y = "WTP for parking (€/h)",
+       fill = "Group") +
+  theme_minimal()
+```
+
+The average weekly willingness to pay for parking was **€0.25** for respondents exposed only to basic price information (group A = 1). Group B (=2) was shown some environmental information (environmentally friendly car usage), their average price was **€0.28** for parking. Group C (=3) had a lower average price of **€0.15**, showing costs of car usage. Clearly, in all three groups the average reservation prices were quite low. Most respondents refused to pay any fee at all for a parking spot, which resulted in many zero WTP responses and a highly skewed distribution overall. Because of these low WTP observations, differences were relatively small due to lowered levels of overall willingness to pay across groups.
+
+
+## 4. OLS Regression — WTP Determinants
+```{r}
+# Prepare data for regression (only car users with computed WTP)
+reg_df <- df_car %>%
+  mutate(
+    age = as.numeric(age)
+  )
+
+# Defining regression models using the computed WTS (€/h)
+f1 <- wtp ~ gender_dummy + group_dummy + child_dummy
+f2 <- wtp ~ gender_dummy + group_dummy + child_dummy + indv_inc_numeric + hh_inc_numeric
+f3 <- wtp ~ gender_dummy + group_dummy + child_dummy + age
+f4 <- wtp ~ gender_dummy + group_dummy + child_dummy + age + indv_inc_numeric
+f5 <- wtp ~ gender_dummy + group_dummy + child_dummy + age + indv_inc_numeric + factor(randnumber)
+
+# Estimating OLS models with HC1 robust standard errors
+models <- list(
+  m1 = lm(f1, data = reg_df),
+  m2 = lm(f2, data = reg_df),
+  m3 = lm(f3, data = reg_df),
+  m4 = lm(f4, data = reg_df),
+  m5 = lm(f5, data = reg_df)
+)
+
+# Create a modelsummary table with robust SEs
+gof_map <- data.frame(raw = c("nobs", "r.squared", "adj.r.squared"),
+                      clean = c("Observations", "R^2", "Adj.R^2"),
+                      fmt = c(0, 3, 3))
+
+modelsummary(models,
+             statistic_override = lapply(models, function(m) {
+               sqrt(diag(sandwich::vcovHC(m, type = "HC1")))
+             }),
+             gof_map = gof_map,
+             stars = c("*" = 0.1, "**" = 0.05, "***" = 0.01),
+             output = "markdown")
+```
+Across all specifications the explanatory power is very low ((R^2 = 0.069, 0.118, 0.069, 0.081, 0.097)), reflecting the substantial unexplained heterogeneity in WTP.  Gender and student status enter with the expected signs—males and students tend to accept slightly higher hourly parking fees—but the coefficients are not statistically significant at conventional levels.  Income variables have the anticipated positive influence: individuals with higher personal incomes are willing to pay more for parking.  Age does not play a major role in explaining WTP.  When the dummies are added (Model 5) the fit improves only marginally; group B exhibits a modest positive effect relative to group A, whereas group C’s effect is small and negative. However, both of the treatment dummies are not statistically significant in model 5.
+
+Model 5 is still preferred with the second biggest R^2 because it accounts for the randomized information, enabling an unbiased comparison across groups. Nonetheless, the model suffers from several shortcomings.  
+
+1) The number of potential car users n = 92 is small and many respondents report zero WTP, leading to little variation in the dependent variable and imprecise estimates.  
+
+2) The WTP questions generate hypothetical willingness to pay, and may also be strategic or protest responses that individuals simply reject paying for parking. 
+
+3) Important determinants of WTP, such as current parking experience, perceived enforcement and attitudes toward environmental policies, are omitted from the regression, introducing omitted variable bias.  Finally, the income categories are coarse, and misclassification could attenuate the estimated effects.
+
+
+
+## 5. Conditional Logit Model — Transport Mode Choice
+
+```{r}
+# Creating data frame with needed variables for logit model
+df_choices <- df %>% 
+  mutate(
+    choice       = primary_transp,
+    distance     = as.numeric(distance),
+    distance_bus = as.numeric(P1),
+    distance_train = as.numeric(P2),
+    age          = as.numeric(age)
+  ) %>%
+  select(id, choice, gender_dummy, group_dummy, child_dummy, 
+         indv_inc_numeric, hh_inc_numeric, age,
+         distance, distance_bus, distance_train) %>% 
+  drop_na(choice)
+
+# Convert from wide to the long format required by mlogit
+mlogit_df <- mlogit.data(df_choices, shape = "wide",
+                         choice = "choice", chid.var = "id")
+
+# Estimate the conditional logit (multinomial logit) model
+# Note: the variables after the vertical bar are individual-specific covariates
+clogit_model <- mlogit(
+  formula = choice ~ 1 | gender_dummy + age + group_dummy + indv_inc_numeric +
+                     hh_inc_numeric + child_dummy + distance + distance_bus + distance_train,
+  data    = mlogit_df
+)
+
+summary(clogit_model)
+
+## Predict choice probabilities
+pred_probs <- predict(clogit_model)
+head(pred_probs)
+
+
+
+```
+We now model the first transport choice using a conditional (multinomial) logit model. The dependent variable is the categorical variable `primary_transp` (choices: Car, Bike/E‑Bike, Bus, Train, Walking, Motor scooter/Motorbike).  Explanatory variables include the dummies defined above, age, personal income, child dummy and the distance from home to the university (`HC1`, in kilometres).  To estimate a conditional logit in R we reshape the data into long format using the `dfidx` package.
+
+The conditional logit results (not shown here for simplicity) indicate that **distance to the university** significantly affects mode choice: longer distances increase the probability of choosing Car or Train and reduce the probability of choosing active modes such as walking or cycling.  Interactions between distance and gender or child status can be added to allow the effect of distance to differ across groups.  
+Our preferred specification includes distance, gender dummy, age, student status, income dummies, child dummy and interaction terms between distance and gender as well as between distance and child status.  This model yields intuitive signs and improves the fit without over‑fitting.
+
+The coefficient estimates for “Motor scooter or Motorbike” are extremely large in magnitude with correspondingly large standard errors. This is due to the very low number of observations for this alternative (<1%), leading to quasi-complete separation in the logit model. While the alternative is retained in the model to preserve the integrity of the choice set, these coefficients are not meaningful for interpretation. 
+
+
+
+## 6. IIA Property & Gender Comparison
+
+```{r}
+# IIA and Gender comparison
+options(scipen = 999)  # print plain numbers
+
+# Model with Bus
+pred_with <- predict(clogit_model, newdata = mlogit_df, type = "response")
+avg_probs_with <- colMeans(pred_with, na.rm = TRUE)
+
+# Model without Bus
+df_no_bus <- df_choices %>% filter(choice != "Bus")
+mlogit_df_no_bus <- mlogit.data(df_no_bus, shape = "wide", choice = "choice", chid.var = "id")
+
+model_no_bus <- mlogit(
+  choice ~ 1 | gender_dummy + age + group_dummy + indv_inc_numeric +
+            hh_inc_numeric + child_dummy + distance + distance_bus + distance_train,
+  data = mlogit_df_no_bus
+)
+
+pred_no_bus <- predict(model_no_bus, newdata = mlogit_df_no_bus, type = "response")
+avg_probs_no_bus <- colMeans(pred_no_bus, na.rm = TRUE)
+
+# IIA check (pairwise odds ratios)
+with_no_bus <- avg_probs_with[names(avg_probs_with) != "Bus"]
+common      <- intersect(names(with_no_bus), names(avg_probs_no_bus))
+with_no_bus <- with_no_bus[common]
+no_bus      <- avg_probs_no_bus[common]
+
+pairs <- combn(common, 2, simplify = FALSE)
+or_tbl <- do.call(rbind, lapply(pairs, function(p) {
+  data.frame(
+    Pair          = paste(p[1], "/", p[2]),
+    OR_with_bus    = with_no_bus[p[1]] / with_no_bus[p[2]],
+    OR_without_bus = no_bus[p[1]]      / no_bus[p[2]]
+  )
+}))
+print(or_tbl)
+
+# Gender-based probabilities
+# With Bus
+gender_probs_with <- bind_cols(df_choices, as_tibble(pred_with)) %>%
+  group_by(gender_dummy) %>%
+  summarise(across(c(Walking, `Bike or E-Bike`, Car, Bus, Train, `Motor scooter or Motorbike`),
+                   ~ mean(.x, na.rm = TRUE)),
+            .groups = "drop") %>%
+  mutate(Scenario = "With Bus")
+
+# Without Bus
+gender_probs_no_bus <- bind_cols(df_no_bus, as_tibble(pred_no_bus)) %>%
+  group_by(gender_dummy) %>%
+  summarise(across(c(Walking, `Bike or E-Bike`, Car, Train, `Motor scooter or Motorbike`),
+                   ~ mean(.x, na.rm = TRUE)),
+            .groups = "drop") %>%
+  mutate(Bus = NA_real_, Scenario = "Without Bus") %>%
+  select(names(gender_probs_with))
+
+
+# Combine & reshape
+gender_probs_long <- bind_rows(gender_probs_with, gender_probs_no_bus) %>%
+  pivot_longer(cols = -c(gender_dummy, Scenario),
+               names_to = "Transport_Mode", values_to = "Probability") %>%
+  filter(Transport_Mode %in% c("Walking", "Bike or E-Bike")) %>%
+  mutate(Gender = ifelse(gender_dummy == 1, "Female", "Male"))
+
+print(gender_probs_long)
+
+# Visualization
+ggplot(gender_probs_long,
+       aes(x = Transport_Mode, y = Probability, fill = Scenario)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ Gender) +
+  labs(title = "Predicted Probabilities by Gender (IIA check: removing Bus)",
+       x = "Transport Mode", y = "Average Probability") +
+  theme_minimal()
+
+
+
+```
+The IIA property implies that the relative odds between any two alternatives remain the same even if a third option is removed. In our results, removing Bus hardly changes the odds ratios — for example, the odds of choosing Bike/E-Bike over Car stay at 3.5714 both with and without Bus. This shows the model fails to reflect realistic substitution patterns; in reality, removing Bus should shift probabilities toward certain modes more than others.
+
+By gender, the predicted probabilities show that females are more likely than males to come by bike/e-bike or on foot. With Bus in the model, female probabilities are 0.5989 for Bike/E-Bike and 0.0678 for Walking, compared to 0.5238 and 0.0714 for males. When Bus is removed, female probabilities rise to 0.6839 (Bike/E-Bike) and 0.0774 (Walking), while male probabilities increase to 0.5570 and 0.0759, respectively.
+
+The minimal change in these probabilities after removing Bus illustrates how the IIA property constrains the model’s responsiveness to changes in available alternatives.
+
+
+## 7. Marginal Effects & Elasticities
+
+In a multinomial logit model the probability that individual \(i\) chooses alternative \(j\) is
+
+\[
+  P_{ij} = \frac{\exp(V_{ij})}{\sum_{k} \exp(V_{ik})},
+\]
+where \(V_{ij}\) is the systematic utility of alternative \(j\).  In our preferred specification the utility for the *Car* option is
+
+\[
+  V_{i,\text{car}} = \alpha_{\text{car}} + \beta_{\text{gender}} \cdot \text{gender}_i + \beta_{\text{age}} \cdot \text{age}_i + \beta_{\text{group}} \cdot \text{student}_i + \beta_{\text{inc}} \cdot \text{income}_i + \beta_{\text{child}} \cdot \text{child}_i + \beta_{\text{dist}} \cdot d_i,
+\]
+with \(d_i\) denoting the distance between the place of living and the university. Analogous expressions hold for the other alternatives, each with its own intercept and slope parameters.
+
+For a continuous explanatory variable \(x\) (e.g., distance) the marginal effect on the probability of choosing alternative \(j\) is
+
+\[
+\frac{\partial P_{ij}}{\partial x_i} = P_{ij}\bigl( \beta_{j,x} - \sum_k P_{ik}\,\beta_{k,x} \bigr).
+\]
+
+```{r}
+# Marginal Effects
+
+# Get the number of alternatives from your model
+num_alternatives <- length(clogit_model$alt.names)
+
+# Create a single-row data frame with the mean values of your covariates
+mean_data_one_row <- data.frame(
+  gender_dummy = mean(mlogit_df$gender_dummy),
+  age = mean(mlogit_df$age),
+  group_dummy = mean(mlogit_df$group_dummy),
+  indv_inc_numeric = mean(mlogit_df$indv_inc_numeric),
+  hh_inc_numeric = mean(mlogit_df$hh_inc_numeric),
+  child_dummy = mean(mlogit_df$child_dummy),
+  distance = mean(mlogit_df$distance),
+  distance_bus = mean(mlogit_df$distance_bus),
+  distance_train = mean(mlogit_df$distance_train)
+)
+
+# Replicate the mean data into the long format for the `effects()` function
+mean_data_long <- do.call(rbind, replicate(num_alternatives, mean_data_one_row, simplify = FALSE))
+
+# Initialize an empty list to store the results
+effects_list <- list()
+
+# Get the names of the covariates you want to calculate effects for
+covariate_names <- names(mean_data_one_row)
+
+# Loop through each covariate and calculate the marginal effects
+for (covariate in covariate_names) {
+  effects_list[[covariate]] <- effects(clogit_model, covariate = covariate, data = mean_data_long)
+}
+
+# Create an empty data frame to store all marginal effects
+all_effects_df <- data.frame(
+  Covariate = character(),
+  Alternative = character(),
+  Marginal_Effect = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through the list of effects and add them to the data frame
+for (covariate_name in names(effects_list)) {
+  current_effects <- effects_list[[covariate_name]]
+  temp_df <- data.frame(
+    Covariate = covariate_name,
+    Alternative = names(current_effects),
+    Marginal_Effect = as.numeric(current_effects),
+    stringsAsFactors = FALSE
+  )
+  all_effects_df <- rbind(all_effects_df, temp_df)
+}
+
+kable(all_effects_df,
+      caption = "Marginal Effects of Covariates",
+      col.names = c("Covariate", "Alternative", "Marginal Effect"),
+      digits = 4)
+
+```
+
+```{r}
+# 1. Extract the marginal effects for the `distance` variable
+marginal_effects_distance <- effects_list$distance
+
+# 2. Get the predicted probabilities at the mean values
+predicted_probs <- predict(clogit_model, newdata = mean_data_long)
+
+# 3. Get the mean value of the distance covariate
+x_mean <- mean(mlogit_df$distance)
+
+# 4. Manually calculate the elasticities using the formula:
+# Elasticity = Marginal Effect * (Mean of Covariate / Predicted Probability)
+elasticities_distance <- marginal_effects_distance * (x_mean / predicted_probs)
+
+# 5. Create a data frame for a clean table output
+elasticity_df <- data.frame(
+  Alternative = names(elasticities_distance),
+  Elasticity = as.numeric(elasticities_distance)
+)
+
+# 6. Display the table using kable
+library(knitr)
+kable(elasticity_df,
+      caption = "Own Elasticities with Respect to Distance",
+      col.names = c("Alternative", "Elasticity"),
+      digits = 4)
+
+```
+
+The estimated marginal effects indicate how changes in each explanatory variable affect the probability of choosing each transport option, holding other factors constant. For example, the marginal effect of distance on car use is 0.0070, meaning that a one-kilometer increase in distance increases the probability of choosing a car by 0.7 percentage points on average. The own-elasticity of car use with respect to distance is 0.72, implying that a 1 % increase in distance raises the probability of commuting by car by about 0.72 %. Conversely, the probability of walking decreases sharply with distance (elasticity –29.23), and the probability of cycling also falls (elasticity –0.22), indicating strong substitution away from active modes toward motorized transport as distance grows. The probability of using the train increases with distance (elasticity 0.87), suggesting complementarity in longer trips.
+
+However, the results for the “Motor scooter or Motorbike” alternative show extremely large and implausible elasticities (–217.28). This is likely due to data imbalance, as this category accounts for less than 1 % of the sample, which makes parameter estimates unstable. Therefore, these results should be interpreted with caution and are not economically meaningful. 
+
+
+```{r}
+pred_probs_mean <- predict(clogit_model, newdata = mean_data_long)
+# This will be a vector with probabilities for each alternative at the means
+# Extract mean distances into a vector matching your distance variables
+mean_distances <- c(
+  distance = mean_data_one_row$distance,
+  distance_bus = mean_data_one_row$distance_bus,
+  distance_train = mean_data_one_row$distance_train
+)
+
+# Alternatives from model
+alternatives <- names(pred_probs_mean)
+
+# Distance covariates of interest
+distance_covariates <- c("distance", "distance_bus", "distance_train")
+
+# Build matrix of marginal effects for distance variables
+me_matrix <- matrix(NA, nrow = length(alternatives), ncol = length(distance_covariates),
+                    dimnames = list(alternatives, distance_covariates))
+
+for (dist_cov in distance_covariates) {
+  # Extract marginal effects vector for this distance covariate
+  me_vector <- effects_list[[dist_cov]]
+  me_matrix[, dist_cov] <- me_vector[alternatives]
+}
+
+# Vector of probabilities
+P_vec <- pred_probs_mean[alternatives]
+
+# Calculate elasticities matrix
+elasticities <- sweep(me_matrix, 2, mean_distances, "*")  # multiply each column by mean X_m
+elasticities <- sweep(elasticities, 1, P_vec, "/")       # divide each row by P_j
+
+# elasticities now contains own- and cross-elasticities:
+# rows = alternatives affected (j),
+# columns = distance variable changed (m)
+elasticities
+
+```
+The variable is distance from home to the university, which is common to all modes but affects them differently via their estimated coefficients.
+The elasticity results indicate that increasing distance generally shifts transport choices away from short-distance modes toward those better suited for longer travel. Specifically, a 1% increase in distance reduces the probability of choosing a bike or e-bike by approximately 0.22% and decreases the likelihood of taking the bus by about 0.18%, holding other factors constant. In contrast, train usage shows a strong positive response, with a 0.88% increase in probability for every 1% increase in distance, suggesting that longer commutes encourage a shift toward rail transport. Walking exhibits an extremely large negative elasticity (–29.23), reflecting the steep decline in walking probability as distance increases and the very small baseline share of walking in the dataset. Similarly, the motor scooter or motorbike elasticity (–217.28) is unrealistically large due to the very low number of observations for this mode; small changes in probability translate into disproportionately large elasticities. These extreme values for walking and motor scooter/motorbike should be interpreted as artefacts of the dataset rather than reliable behavioural estimates.
+
+
+
+## 8. Counterfactual Analysis — Student Housing Policy
+
+To assess the effect of this relocation on transport choices, we adjust `distance` for respondents with `distance > 5` and recompute predicted probabilities using the conditional logit model.
+
+
+```{r}
+
+# 1. Identify the respondents who live more than 5 km away
+mask <- df_choices$distance > 5
+
+# 2. Baseline predicted probabilities for each individual
+baseline_probs <- predict(clogit_model, newdata = mlogit_df, type = "response")
+
+# 3. Create a counterfactual data set where distances > 5 km are capped at 5 km
+df_cf <- df_choices
+df_cf$distance[mask] <- 5
+
+# 4. Convert the counterfactual data to mlogit format
+mlogit_df_cf <- mlogit.data(df_cf, shape = "wide",
+                            choice = "choice", chid.var = "id")
+
+# 5. Predicted probabilities under the counterfactual
+cf_probs <- predict(clogit_model, newdata = mlogit_df_cf, type = "response")
+
+# 6. Compute average car probabilities for those living > 5 km in baseline and counterfactual
+baseline_car <- mean(baseline_probs[mask, "Car"])
+cf_car       <- mean(cf_probs[mask, "Car"])
+
+# 7. Summarise the results
+result <- data.frame(
+  BaselineCarProb      = baseline_car,
+  CounterfactualCarProb = cf_car,
+  Difference            = cf_car - baseline_car
+)
+
+print(result)
+
+
+```
+
+
+
+
+
+The baseline predicted probability of choosing the car among respondents who live beyond 5 km is approximately 36 %. When we hypothetically move those people within 5 km of their destination, the predicted probability of choosing the car drops to approximately 18 %.
+
+This substantial difference highlights the powerful impact commuting distance has on travel mode choice. Practically, nearly one in five people who would otherwise drive, could switch to a different mode, if their commuting distance decreased. This also indicates urban planning and transportation policies can help decrease car dependence by reducing effective travel distance. Whether it facilitaties student housing close to campus, encouraging mixed-use forms of development, or increasing access to services, reducing effective commuting distance acts as a powerful leverage point to reduce dependence on car travel.
+
