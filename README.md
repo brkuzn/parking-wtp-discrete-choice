@@ -121,7 +121,7 @@ For respondents with $d_i > 5$ km, the distance variable is set to 5 km and pred
 
 ```
 ├── EmpiricalProject2025.Rmd    # Full analysis (R Markdown)
-├── raw_data.csv                # Survey data (anonymized)
+├── raw_data.csv                # Data is not included in this repository. It was collected via a university survey at the University of Oldenburg. Available upon request with appropriate permissions.
 └── README.md
 ```
 
@@ -137,7 +137,7 @@ install.packages(c("mlogit", "tidyverse", "modelsummary", "dfidx",
 # Knit to HTML or PDF in RStudio, or run chunks interactively
 ```
 
-> The analysis was developed in RStudio. `raw_data.csv` must be in the working directory. All preprocessing steps are self-contained in the .Rmd file.
+> The analysis was developed in RStudio. Data is not included in this repository. It was collected via a university survey at the University of Oldenburg. Available upon request with appropriate permissions.. All preprocessing steps are self-contained in the .Rmd file.
 
 ---
 
